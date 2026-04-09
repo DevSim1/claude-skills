@@ -4,228 +4,286 @@ description: >
   Complete operating guide for Digital Cove Ops (DCO) outreach system.
   Load this whenever Simone asks about DCO, the outreach system, sending emails,
   scraping leads, checking results, or anything related to Digital Cove's
-  cold outreach pipeline. Contains all endpoints, credentials, business rules,
-  and Cowork workflows in one place.
+  cold outreach pipeline. Contains all MCP tools, endpoints, credentials,
+  business rules, and Cowork workflows in one place.
 ---
 
 # Digital Cove Ops — Cowork Operating Guide
 
-This document is the single source of truth for running the DCO cold outreach
-pipeline via Cowork. Everything you need: system overview, all API endpoints,
-business rules, and step-by-step workflows.
+Single source of truth for running the DCO cold outreach pipeline.
+Use **MCP tools directly** wherever possible — they are faster, more reliable,
+and don't require navigating the browser console.
 
 ---
 
-## System Overview
+## Available MCPs — What Each One Does for DCO
 
-Digital Cove sells a Google Business Profile (GBP) automation service to local
-businesses (florists, barbers, hair salons). Clients send photos via WhatsApp,
-we generate AI captions and post them to Google automatically.
+### Supabase MCP — database reads and writes
+**⚠️ CRITICAL: ALWAYS use `project_id: uevsgwozfcuttayhplzj` explicitly.**
+The bare `supabase:execute_sql` (lowercase, no project_id) connects to a
+DIFFERENT project (FanRink) and must NEVER be used for DCO work.
+Always use the capitalised `Supabase:execute_sql` with the project_id.
 
-The outreach pipeline finds businesses that:
-- Are on Google Maps with 15–150 reviews and 3.8★+
-- Have not been posting to GBP regularly (our product solves their problem)
-- Have a real contact email we can reach
+Use for: checking leads, importing leads, checking send results, updating
+lead status, marking conversions, skip/unsubscribe operations.
 
-We email them a 3-step drip sequence (day 1, day 5, day 12) via Resend.
-Resend free tier: **100 emails/day max. Never exceed this.**
+### Vercel MCP — deployments and logs
+- `Vercel:list_deployments` — check if latest code is live in production
+- `Vercel:get_deployment_build_logs` — debug a failed build
+- `Vercel:get_runtime_logs` — see what happened when emails were sent
+- `Vercel:get_project` — confirm project config
+
+DCO project ID: `prj_OunOw4tQpl0FdT6xneN5uFd6EsjS`
+Team ID: `team_l8PGGaIxGVbyDHwXHc64AOnb`
+
+### GitHub MCP — code changes
+- `github:push_files` — update skill files or fix code
+- `github:get_file_contents` — read current code before editing
+- `github:create_or_update_file` — update a single file
+
+DCO backend repo: `DevSim1/Digitalcove-ops` (branch: `claude/setup-nextjs-app-router-z9yaE`)
+Skills repo: `DevSim1/claude-skills` (branch: `main`)
+
+### Claude in Chrome — browser automation
+Use for: Google Maps scraping (the £0 lead finding method), navigating
+the admin panel, triggering the send-batch API (the only thing that
+still needs the browser, since it calls Resend).
+
+### Stripe MCP — subscription management
+Use for: checking if a customer paid, creating prices, listing subscriptions.
+DCO product is ListingPilot (needs renaming to reflect Digital Cove branding).
 
 ---
 
 ## Infrastructure
 
-| Service | URL / Details |
+| Service | Detail |
 |---|---|
-| Backend (ops) | `https://app.thedigitalcove.co.uk` |
-| Frontend (landing pages) | `https://thedigitalcove.co.uk` |
+| Backend | `https://app.thedigitalcove.co.uk` |
+| Frontend | `https://thedigitalcove.co.uk` |
 | Admin panel | `https://app.thedigitalcove.co.uk/admin/outreach` |
-| Database | Supabase project `uevsgwozfcuttayhplzj` |
-| Email sending | Resend (free tier — 3,000/month, 100/day) |
-| Hosting | Vercel (team: `team_l8PGGaIxGVbyDHwXHc64AOnb`) |
+| Supabase project | `uevsgwozfcuttayhplzj` (68 tables) |
+| Vercel project | `prj_OunOw4tQpl0FdT6xneN5uFd6EsjS` |
+| Vercel team | `team_l8PGGaIxGVbyDHwXHc64AOnb` |
+| Email sending | Resend — 3,000/month, **100/day hard cap** |
+| API auth header | `Authorization: Bearer dc-outreach-2026` |
 
-**Auth header for all API calls:**
+---
+
+## Landing Pages (confirmed live — only use these 3 niches)
+
+| Niche | Landing page |
+|---|---|
+| `florists` | `thedigitalcove.co.uk/florists` |
+| `barbers` | `thedigitalcove.co.uk/barbers` |
+| `salons` | `thedigitalcove.co.uk/salons` |
+
+Do not outreach for other niches until their landing pages are built.
+
+---
+
+## MCP Workflows — Use These First
+
+### Check how many emails sent today
+
+Use **Supabase MCP** — no browser needed:
+
+```sql
+-- How many sent today
+SELECT COUNT(*) as sent_today
+FROM outreach_sends
+WHERE created_at > NOW() - INTERVAL '24 hours'
+  AND error IS NULL;
+
+-- How many new leads ready to send (step 1)
+SELECT COUNT(*) as ready_to_send
+FROM outreach_leads
+WHERE status = 'new'
+  AND sequence_step = 0
+  AND unsubscribed = false;
 ```
-Authorization: Bearer dc-outreach-2026
+
+Call with:
+`Supabase:execute_sql` → `project_id: uevsgwozfcuttayhplzj`
+
+---
+
+### Import leads directly to database
+
+After Simone approves the leads table from the Google Maps scrape,
+insert directly via **Supabase MCP** — no CSV endpoint needed:
+
+```sql
+INSERT INTO outreach_leads (
+  business_name, email, location, niche,
+  google_rating, google_review_count,
+  status, sequence_step, unsubscribed, source
+) VALUES
+  ('Fallon and Mann Barbers', 'hello@fallonandmannbarbers.co.uk',
+   'Edinburgh', 'barbers', 5.0, 60, 'new', 0, false, 'cowork'),
+  ('The Barber Club', 'thebarberclub.dan@gmail.com',
+   'Edinburgh', 'barbers', 5.0, 30, 'new', 0, false, 'cowork')
+-- add more rows here
+;
+```
+
+**Before inserting, always check for duplicates:**
+```sql
+SELECT email FROM outreach_leads
+WHERE email IN (
+  'hello@fallonandmannbarbers.co.uk',
+  'thebarberclub.dan@gmail.com'
+);
+```
+Only insert emails not already in that list.
+
+**Email blocklist — never insert these domains:**
+`sentry-next.wixpress.com`, `wixpress.com`, `webador.com`, `squarespace.com`,
+`shopify.com`, `wix.com`, `godaddy.com`, `domain.com`, `example.com`,
+`hubspot.com`, `noreply.com`
+
+Also never insert: `user@domain.com`, any email with a hex string before `@`,
+any email containing `&quot;` or HTML entities.
+
+---
+
+### Check send results and open rates
+
+Use **Supabase MCP**:
+
+```sql
+-- Full send summary for today
+SELECT
+  ol.business_name,
+  ol.niche,
+  ol.location,
+  os.variant,
+  os.subject,
+  os.error,
+  os.opened_at,
+  os.clicked_at,
+  os.created_at
+FROM outreach_sends os
+JOIN outreach_leads ol ON ol.id = os.lead_id
+WHERE os.created_at > NOW() - INTERVAL '24 hours'
+ORDER BY os.created_at DESC;
+
+-- Open rate summary
+SELECT
+  COUNT(*) as total_sent,
+  COUNT(opened_at) as opened,
+  COUNT(clicked_at) as clicked,
+  ROUND(COUNT(opened_at)::numeric / COUNT(*) * 100, 1) as open_rate_pct
+FROM outreach_sends
+WHERE error IS NULL
+  AND created_at > NOW() - INTERVAL '7 days';
 ```
 
 ---
 
-## Landing Pages (confirmed live)
+### Mark a lead as converted
 
-Only use these three niches — they have real landing pages:
+Use **Supabase MCP** when a prospect signs up:
 
-| Niche | Landing page | Email template group |
-|---|---|---|
-| `florists` | `thedigitalcove.co.uk/florists` | warm |
-| `barbers` | `thedigitalcove.co.uk/barbers` | warm |
-| `salons` | `thedigitalcove.co.uk/salons` | warm |
-
-Do **not** outreach for other niches until landing pages are built for them.
-
----
-
-## All API Endpoints
-
-### 1. Scrape leads automatically (Places API — has small cost)
-
-```
-POST https://app.thedigitalcove.co.uk/api/outreach/scrape-leads
-Authorization: Bearer dc-outreach-2026
-Content-Type: application/json
-```
-
-**Body:**
-```json
-{
-  "niche": "barbers",
-  "city": "Edinburgh",
-  "limit": 12,
-  "pages": 1
-}
-```
-
-**What it does:** Searches Google Maps via Places API, filters 15–150 reviews
-/ 3.8★+, fetches each business website, extracts email (tries homepage then
-/contact page), inserts into DB. Costs ~£0.80 per 6-city run.
-
-**Prefer the Cowork browser method instead (£0 cost) — see workflow below.**
-
-**Response:**
-```json
-{
-  "success": true,
-  "added": 5,
-  "no_website": 3,
-  "no_email_found": 4,
-  "blocked_emails": 2,
-  "added_businesses": ["Salon A", "Salon B", ...]
-}
+```sql
+UPDATE outreach_leads
+SET
+  converted_at = NOW(),
+  status = 'converted',
+  conversion_channel = 'cold_email'
+WHERE email = 'hello@example.co.uk';
 ```
 
 ---
 
-### 2. Import leads from CSV (Cowork's primary import method — free)
+### Skip or unsubscribe a lead
 
-```
-POST https://app.thedigitalcove.co.uk/api/outreach/import-csv
-Authorization: Bearer dc-outreach-2026
-Content-Type: text/csv
-[body: raw CSV content]
-```
+Use **Supabase MCP**:
 
-**CSV format** (exact column names required):
-```csv
-business_name,email,location,niche,google_rating,google_review_count,notes
-Fallon and Mann Barbers,hello@fallonandmannbarbers.co.uk,Edinburgh,barbers,5.0,60,last post 45 days ago
-The Barber Club,thebarberclub.dan@gmail.com,Edinburgh,barbers,5.0,30,no GBP posts found
-```
+```sql
+-- Skip (stop emails, keep in system)
+UPDATE outreach_leads SET status = 'skip'
+WHERE email = 'hello@example.co.uk';
 
-Required: `business_name`, `email`, `niche`, `location`
-Optional: `google_rating`, `google_review_count`, `notes`
-
-Valid niches: `florists` `barbers` `salons` (and others, but only these 3 have landing pages)
-
-**The endpoint automatically:**
-- Validates email format
-- Rejects Wix/Sentry/placeholder emails
-- Skips duplicates (same email already in system)
-- Returns row-by-row detail on anything rejected
-
-**Response:**
-```json
-{
-  "success": true,
-  "imported": 8,
-  "skipped_duplicates": 2,
-  "invalid": 1,
-  "invalid_rows": [
-    { "row": 4, "reason": "Invalid email: user@domain.com", "data": "Rum Barber" }
-  ]
-}
-```
-
-**How to call from browser console on `app.thedigitalcove.co.uk`:**
-```javascript
-const csv = `business_name,email,location,niche,google_rating,google_review_count
-Fallon and Mann Barbers,hello@fallonandmannbarbers.co.uk,Edinburgh,barbers,5.0,60`;
-
-fetch('/api/outreach/import-csv', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'text/csv',
-    'Authorization': 'Bearer dc-outreach-2026'
-  },
-  body: csv
-}).then(r => r.json()).then(console.log);
+-- Unsubscribe (they asked to be removed)
+UPDATE outreach_leads
+SET unsubscribed = true, status = 'skip'
+WHERE email = 'hello@example.co.uk';
 ```
 
 ---
 
-### 3. View all leads
+### Check pipeline health
 
-```
-GET https://app.thedigitalcove.co.uk/api/outreach/leads
-Authorization: Bearer dc-outreach-2026
-```
+Use **Supabase MCP** for a full snapshot:
 
-Returns all leads with status, niche, location, sequence step, etc.
+```sql
+SELECT
+  status,
+  niche,
+  COUNT(*) as count
+FROM outreach_leads
+GROUP BY status, niche
+ORDER BY niche, status;
+```
 
 ---
 
-### 4. Send a batch (Step 1, 2, or 3)
+### Check deployment status
 
-```
-POST https://app.thedigitalcove.co.uk/api/outreach/send-batch
-Authorization: Bearer dc-outreach-2026
-Content-Type: application/json
-```
+Use **Vercel MCP** — `Vercel:list_deployments`:
+- `projectId: prj_OunOw4tQpl0FdT6xneN5uFd6EsjS`
+- `teamId: team_l8PGGaIxGVbyDHwXHc64AOnb`
 
-**Body:**
-```json
-{
-  "step": 1,
-  "limit": 50
-}
-```
+Latest deployment should show `state: READY` and `target: production`.
+If it shows `state: ERROR`, use `Vercel:get_deployment_build_logs` to debug.
 
-Optional filters:
-- `"niche": "barbers"` — only send to one niche
-- `"variant": "a"` — force a specific template variant (a/b/c)
-- `"limit": 20` — cap the batch size
+---
 
-**Step logic:**
-- `step: 1` — sends to all leads with `status=new` and `sequence_step=0`
-- `step: 2` — sends to leads 5+ days after step 1 was sent
-- `step: 3` — sends to leads 12+ days after step 2 was sent
+### Check Vercel runtime logs (did emails actually send?)
 
-**IMPORTANT — daily limit:**
-Resend free tier = 100 emails/day hard cap.
-Always check how many have been sent today before triggering a batch.
-Check from browser console on `app.thedigitalcove.co.uk`:
-```javascript
-// Check how many sent today (last 24h)
-fetch('/api/outreach/leads').then(r => r.json()).then(d => {
-  const today = new Date();
-  today.setHours(0,0,0,0);
-  const sent = d.filter(l =>
-    l.last_email_sent_at &&
-    new Date(l.last_email_sent_at) > today
-  );
-  console.log(`Sent today: ${sent.length} / 100 limit`);
-});
-```
+Use **Vercel MCP** — `Vercel:get_runtime_logs`:
+- `projectId: prj_OunOw4tQpl0FdT6xneN5uFd6EsjS`
+- `teamId: team_l8PGGaIxGVbyDHwXHc64AOnb`
+- `query: "Outreach"` — filters to outreach-related log lines
+- `since: "1h"` — last hour
 
-**Response:**
-```json
-{
-  "success": true,
-  "sent": 8,
-  "failed": 0,
-  "step": 1
-}
+Look for lines like:
+- `[Outreach] ✓ step1(a) → email@domain.co.uk` — successful send
+- `[Outreach] ✗ email@domain.co.uk` — failed send
+- `[Cron] Outreach followup complete` — drip cron ran successfully
+
+---
+
+### Update the skills files
+
+Use **GitHub MCP** — `github:push_files` or `github:create_or_update_file`:
+- Owner: `DevSim1`
+- Repo: `claude-skills`
+- Branch: `main`
+- Always fetch the current SHA first with `github:get_file_contents` before updating
+
+---
+
+## Trigger a Send (still needs Chrome — calls Resend)
+
+The send-batch endpoint is the one thing that must go through the browser,
+because it calls Resend's API to actually deliver emails. Supabase MCP
+can't do that.
+
+### Step 1 — Check daily count first (Supabase MCP)
+```sql
+SELECT COUNT(*) as sent_today
+FROM outreach_sends
+WHERE created_at > NOW() - INTERVAL '24 hours'
+  AND error IS NULL;
 ```
 
-**How to call from browser console:**
+### Step 2 — Navigate to the app and trigger via browser console
+
+Use **Claude in Chrome** to navigate to `https://app.thedigitalcove.co.uk`,
+then run in the console:
+
 ```javascript
 fetch('/api/outreach/send-batch', {
   method: 'POST',
@@ -237,313 +295,142 @@ fetch('/api/outreach/send-batch', {
 }).then(r => r.json()).then(console.log);
 ```
 
----
+Adjust `limit` so that `sent_today + limit <= 100`.
 
-### 5. Open tracking (fires automatically)
+The batch sends at 1 email/second — 30 leads takes ~30 seconds.
+Wait for the JSON response before reporting back.
 
+### Step 3 — Verify with Supabase MCP
+```sql
+SELECT COUNT(*) as just_sent
+FROM outreach_sends
+WHERE created_at > NOW() - INTERVAL '5 minutes'
+  AND error IS NULL;
 ```
-GET https://app.thedigitalcove.co.uk/api/outreach/track/open?ref={leadId}&s={step}
-```
-
-Embedded as a 1×1 pixel in every HTML email. Never call manually.
-
----
-
-### 6. Click tracking (fires automatically)
-
-```
-GET https://app.thedigitalcove.co.uk/api/outreach/track/click?ref={leadId}&s={step}&u={encodedUrl}
-```
-
-Wraps every link in the email. Logs the click then redirects to the landing page.
-Never call manually.
 
 ---
 
-### 7. Mark a lead as converted
+## Cowork Workflow — Lead Scraping (£0, preferred method)
+
+Everything here uses **Claude in Chrome** for the browser work,
+then **Supabase MCP** to import. No API cost. Higher email quality.
+
+### Before starting — ask Simone:
+1. Niche: `florists` / `barbers` / `salons`
+2. City: Glasgow / Edinburgh / Dundee / Aberdeen / Stirling / Perth / Paisley
+3. How many leads? (default 15)
+
+Then check daily send budget (Supabase MCP):
+```sql
+SELECT COUNT(*) as sent_today FROM outreach_sends
+WHERE created_at > NOW() - INTERVAL '24 hours' AND error IS NULL;
+```
+
+### Step 1 — Open Google Maps (Chrome MCP)
+Navigate to `https://maps.google.com`.
+Search: `[niche] in [city]` — e.g. `barbers in Edinburgh`.
+
+### Step 2 — Filter results (Chrome MCP)
+For each listing in the panel:
+
+**Skip immediately if:**
+- Under 15 or over 150 reviews
+- Under 3.8 stars
+- Chain brand (TONI&GUY, Regis, Supercuts, Great Clips, etc.)
+- Closed permanently or temporarily
+
+**Click listing → check Posts/Updates tab:**
+- Posted in last 14 days → SKIP (already active, not our target)
+- Last post 30+ days ago, or no posts at all → GOOD TARGET ✓
+
+**Click Website → open in new tab:**
+
+### Step 3 — Find the email (Chrome MCP)
+With real browser open on the business website:
+
+1. Scan for mailto link or visible email on homepage
+2. If none found, try: `/contact`, `/contact-us`, `/about`, `/about-us`
+3. **Accept** if ends in a real business domain
+4. **Reject** if:
+   - Domain: `wix.com`, `squarespace.com`, `sentry.io`, `webador.com`, etc.
+   - Is `user@domain.com` or any placeholder
+   - Has a long hex string before the `@`
+   - Contains `&quot;` or other HTML entities
+
+**Tips:**
+- Booking-system-only sites (Fresha, Treatwell, Booksy) → usually no email → skip
+- Check Instagram bio or Facebook About if website has no email
+
+### Step 4 — Build the leads list
+Record each valid lead. Show Simone the table:
 
 ```
-POST https://app.thedigitalcove.co.uk/api/outreach/convert
-Authorization: Bearer dc-outreach-2026
-Content-Type: application/json
+Business Name            | Email                              | Rating | Reviews | Last GBP Post
+Fallon and Mann Barbers  | hello@fallonandmannbarbers.co.uk   | 5.0    | 60      | 45 days ago
+The Barber Club          | thebarberclub.dan@gmail.com        | 5.0    | 30      | never
+Half-Cut Barbershop      | booking@halfcutbarbershop.co.uk    | 4.9    | 121     | never
 ```
 
-```json
-{
-  "leadId": "uuid-here",
-  "channel": "cold_email"
-}
+Ask: "Here are [N] leads for [niche] in [city]. Any to remove before I import?"
+
+### Step 5 — Import via Supabase MCP (not the API)
+After Simone confirms, insert directly:
+
+```sql
+INSERT INTO outreach_leads (
+  business_name, email, location, niche,
+  google_rating, google_review_count,
+  status, sequence_step, unsubscribed, source
+) VALUES
+  ('Fallon and Mann Barbers', 'hello@fallonandmannbarbers.co.uk',
+   'Edinburgh', 'barbers', 5.0, 60, 'new', 0, false, 'cowork'),
+  ('The Barber Club', 'thebarberclub.dan@gmail.com',
+   'Edinburgh', 'barbers', 5.0, 30, 'new', 0, false, 'cowork')
+;
 ```
 
-Use when a lead signs up. Marks `converted_at` timestamp in the DB.
+### Step 6 — Report back
+```
+Done! Imported [N] leads for [niche] in [city].
+✅ Added: [N] new leads
+⏭  Skipped: [N] duplicates
+❌ Rejected: [N] — [reasons]
+
+Daily budget: [sent_today]/100 used. [remaining] slots left today.
+Shall I trigger a send now, or wait?
+```
 
 ---
 
-### 8. Unsubscribe a lead
+## API Endpoints (for reference — use MCPs above where possible)
 
-```
-GET https://app.thedigitalcove.co.uk/unsubscribe?ref={leadId}
-```
+These are still valid but most tasks are better handled via MCP directly.
 
-Sets `unsubscribed=true` and stops all future emails to that lead.
-Every email footer includes this link.
+| Endpoint | When to use |
+|---|---|
+| `POST /api/outreach/send-batch` | Trigger email sends — still needs Chrome |
+| `POST /api/outreach/scrape-leads` | API-based scraping — costs ~£0.80/run, use only if asked |
+| `POST /api/outreach/import-csv` | CSV import fallback — use Supabase MCP instead |
+| `POST /api/outreach/convert` | Mark converted — use Supabase MCP instead |
+| `GET /api/outreach/leads` | List leads — use Supabase MCP instead |
 
----
-
-## Drip Cron (runs automatically)
-
-Vercel runs a daily cron at **9am** that automatically:
-- Sends step 2 to all leads where step 1 was sent 5+ days ago
-- Sends step 3 to all leads where step 2 was sent 12+ days ago
-
-You don't need to trigger this manually. It's configured in `vercel.json`.
-To check if it ran: look at Vercel runtime logs for `[Cron] Outreach followup complete`.
+All endpoints: `Authorization: Bearer dc-outreach-2026`
 
 ---
 
 ## Email Templates
 
-There are 27 templates: 3 niche groups × 3 variants (A/B/C) × 3 steps.
+27 templates: 3 groups × 3 variants (A/B/C) × 3 steps.
 
-**Groups:**
-- `warm` — florists, barbers, salons, beauty, tattoo, dog-groomers
-- `trades` — electricians, plumbers, cleaners, estate-agents
-- `health` — dentists, vets, personal-trainers, restaurants
-
-**Variants rotate** A→B→C→A→B→C across the batch automatically.
-
-**Subjects used today (examples):**
-- A: `"your Google listing, Medusa"` / `"noticed something about Fratelli Barbers"`
-- B: `"barbers in Edinburgh — thought you should know"` / `"what other salons are doing"`
-- C: `"quick question, Roku"` / `"ROKU — question about ROKU Salon"`
-
+**Groups:** `warm` (florists, barbers, salons), `trades`, `health`
+**Variants** rotate A→B→C automatically across each batch.
 **FROM:** `Chloe from Digital Cove <chloe@thedigitalcove.co.uk>`
-**REPLY-TO:** `SalesSupport@thedigitalcove.co.uk` (M365 inbox — all replies land here)
+**REPLY-TO:** `SalesSupport@thedigitalcove.co.uk` (M365 — all replies land here)
 
----
-
-## Email Quality Rules
-
-NEVER import or send to:
-- `user@domain.com`, `info@example.com`, `test@test.com` (placeholders)
-- Any `@sentry-next.wixpress.com` address (Wix internal monitoring)
-- Any `@webador.com`, `@squarespace.com`, `@shopify.com` (website builder emails)
-- Any `@wix.com`, `@godaddy.com`, `@hubspot.com` (platform emails)
-- Any email with a hex string before the `@` (Sentry monitoring pattern)
-- Any email containing `&quot;`, `\"`, or HTML entities
-- Any email with a TLD shorter than 2 characters
-
-The import endpoint enforces these automatically, but apply them manually
-when building CSVs in Cowork too.
-
----
-
-## Cowork Workflow — Lead Scraping (£0 cost, preferred method)
-
-This is the primary way to find new leads. Costs nothing. Higher quality
-than the API scraper because a real browser extracts emails from rendered pages.
-
-### Before you start
-
-Ask Simone:
-1. Which niche? (`florists` / `barbers` / `salons`)
-2. Which city? (`Glasgow` / `Edinburgh` / `Dundee` / `Aberdeen` / `Stirling` / `Perth` / `Paisley`)
-3. How many leads? (default 15)
-4. Check how many emails remain today (100 - already sent)
-
-### Step 1 — Open Google Maps
-
-Navigate to `https://maps.google.com` in Chrome.
-Search: `[niche] in [city]` — e.g. `barbers in Edinburgh`
-
-### Step 2 — Filter results
-
-For each result in the left panel:
-
-**Skip immediately if:**
-- Fewer than 15 reviews OR more than 150 reviews
-- Less than 3.8 stars
-- Chain brand (TONI&GUY, Regis, Supercuts, Great Clips)
-- "Permanently closed" or "Temporarily closed"
-
-**Click the listing, then:**
-1. Check the "Updates" or "Posts" tab
-   - Posted in the last 14 days → SKIP (already active on GBP)
-   - Last post 30+ days ago, or no posts → GOOD TARGET
-2. Note: business name, rating, review count, days since last post
-3. Click the "Website" link → open in new tab
-
-### Step 3 — Find the email
-
-With the business website open in a real browser:
-
-1. Scan for a mailto link or visible email
-2. If not on homepage, try in order:
-   - `/contact`
-   - `/contact-us`
-   - `/about`
-   - `/about-us`
-3. **Accept** if the email ends in a real business domain
-4. **Reject** if:
-   - Domain is wix.com, squarespace.com, sentry.io, webador.com, etc.
-   - Email is user@domain.com or any obvious placeholder
-   - Long hex string before the @ (Sentry monitoring address)
-   - Contains HTML entities (&quot; etc.)
-
-**Tips for hard cases:**
-- Booking system only (Fresha, Treatwell, Booksy) → usually no email → skip
-- Check their Instagram bio if website has no email
-- Facebook "About" section often has email even when website doesn't
-
-### Step 4 — Build the CSV
-
-Record each valid lead in this format:
-
-```csv
-business_name,email,location,niche,google_rating,google_review_count,notes
-Fallon and Mann Barbers,hello@fallonandmannbarbers.co.uk,Edinburgh,barbers,5.0,60,last post 45 days ago
-The Barber Club,thebarberclub.dan@gmail.com,Edinburgh,barbers,5.0,30,no GBP posts found
-Half-Cut Barbershop,booking@halfcutbarbershop.co.uk,Edinburgh,barbers,4.9,121,never posted
-```
-
-### Step 5 — Show Simone for review
-
-Display the table. Ask:
-> "Here are [N] leads for [niche] in [city]. Any to remove before I import?"
-
-Wait for confirmation or removals.
-
-### Step 6 — Save CSV
-
-Save to desktop as:
-`dco-leads-[niche]-[city]-[YYYY-MM-DD].csv`
-
-### Step 7 — Import
-
-Navigate to `https://app.thedigitalcove.co.uk/admin/outreach` in Chrome.
-Open browser console (Cmd+Option+J on Mac / F12 on Windows).
-
-Run:
-```javascript
-const csv = `[paste full CSV content here]`;
-fetch('/api/outreach/import-csv', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'text/csv',
-    'Authorization': 'Bearer dc-outreach-2026'
-  },
-  body: csv
-}).then(r => r.json()).then(d => {
-  console.log('Imported:', d.imported);
-  console.log('Skipped duplicates:', d.skipped_duplicates);
-  console.log('Invalid:', d.invalid_rows);
-});
-```
-
-### Step 8 — Report to Simone
-
-```
-Done! Results for [niche] in [city]:
-✅ Imported: [N] new leads
-⏭  Skipped: [N] duplicates (already in system)
-❌ Rejected: [N] rows — [reasons if any]
-
-Ready to send. You have [X] daily email slots remaining today.
-Shall I trigger a send now, or wait until tomorrow's batch?
-```
-
----
-
-## Cowork Workflow — Triggering a Send
-
-After importing leads (or any time Simone wants to send):
-
-### Check daily count first
-
-In browser console on `app.thedigitalcove.co.uk`:
-```javascript
-fetch('/api/outreach/leads').then(r => r.json()).then(leads => {
-  const today = new Date();
-  today.setHours(0,0,0,0);
-  const todaySends = leads.filter(l =>
-    l.last_email_sent_at && new Date(l.last_email_sent_at) >= today
-  ).length;
-  const newReady = leads.filter(l => l.status === 'new' && l.sequence_step === 0).length;
-  console.log(`Sent today: ${todaySends}/100`);
-  console.log(`Ready to send (step 1): ${newReady}`);
-});
-```
-
-### Trigger the send
-
-```javascript
-const remaining = 100 - [todaySends]; // replace with actual count
-fetch('/api/outreach/send-batch', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Authorization': 'Bearer dc-outreach-2026'
-  },
-  body: JSON.stringify({ step: 1, limit: remaining })
-}).then(r => r.json()).then(console.log);
-```
-
-**The batch sends 1 email per second** — if sending 30 leads it takes ~30 seconds.
-The response only arrives after all emails are sent, so wait for it.
-
-### Report back
-
-```
-Batch complete:
-✅ Sent: [N] emails
-❌ Failed: [N] (if any — these are usually bad email addresses)
-Remaining daily limit: [100 - total] slots
-
-Step 2 drip will fire automatically in 5 days for today's leads.
-Step 3 fires automatically in 12 days.
-```
-
----
-
-## Cowork Workflow — Checking Results
-
-Simone can ask "how are the emails doing?" or "show me open rates".
-
-Navigate to `https://app.thedigitalcove.co.uk/admin/outreach` — the admin
-panel shows the full sends log with open/click tracking.
-
-Or query the DB directly:
-```javascript
-// Check open rate for today's sends
-fetch('/api/outreach/leads').then(r => r.json()).then(leads => {
-  const contacted = leads.filter(l => l.status === 'contacted');
-  console.log('Total contacted:', contacted.length);
-  // Opened and clicked stats come from the outreach_sends table
-  // — view at /admin/outreach
-});
-```
-
----
-
-## Cowork Workflow — Checking for Replies
-
-Prospect replies go to `SalesSupport@thedigitalcove.co.uk` (M365 inbox).
-Cowork cannot check this inbox directly.
-Tell Simone to check it manually — any reply from a business is warm interest.
-
-If Simone gets a positive reply:
-1. Mark the lead as converted via the API:
-```javascript
-fetch('/api/outreach/convert', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Authorization': 'Bearer dc-outreach-2026'
-  },
-  body: JSON.stringify({ leadId: 'UUID_HERE', channel: 'cold_email' })
-}).then(r => r.json()).then(console.log);
-```
-2. Note: the lead UUID can be found in the admin panel or by searching the leads list
+**Drip timing:**
+- Step 1: immediately on import + manual send trigger
+- Step 2: 5 days after step 1 (cron fires automatically at 9am daily)
+- Step 3: 12 days after step 2 (cron fires automatically at 9am daily)
 
 ---
 
@@ -551,51 +438,55 @@ fetch('/api/outreach/convert', {
 
 | Rule | Detail |
 |---|---|
-| Daily send limit | 100 emails/day (Resend free tier) — hard cap |
+| Daily send limit | **100 emails/day — hard cap, never exceed** |
 | Target: reviews | 15–150 Google reviews |
 | Target: rating | 3.8★ or above |
-| Target: GBP activity | No posts in 30+ days (or never posted) |
+| Target: GBP activity | No posts in 30+ days, or never posted |
 | Skip: chains | TONI&GUY, Regis, Supercuts, Great Clips, etc. |
-| Sequence timing | Step 2: 5 days after step 1. Step 3: 12 days after step 2 |
-| Drip cron | Runs daily at 9am automatically — no manual trigger needed |
-| Geographic model | One business per postcode area per niche (exclusivity) |
-| Niches with pages | florists, barbers, salons ONLY until more pages built |
-| Pricing | £50/month recurring (after 15-day trial at £15) |
+| Active niches | florists, barbers, salons ONLY |
+| Pricing | £50/month (after 15-day trial at £15) |
+| Exclusivity | One business per postcode area per niche |
 
 ---
 
-## Common Tasks — Quick Reference
+## Quick Reference — MCP to Use for Each Task
 
-| What Simone says | What to do |
-|---|---|
-| "scrape leads for barbers in Glasgow" | Run Cowork browser workflow, NOT the API scraper |
-| "send today's emails" | Check daily count, trigger send-batch step 1 |
-| "how many sent today" | Check via browser console snippet above |
-| "show me the results" | Navigate to `/admin/outreach` |
-| "add this lead manually" | Import single-row CSV via import-csv endpoint |
-| "mark [business] as converted" | Use convert endpoint with their lead UUID |
-| "remove a lead" | Update status to 'skip' in admin panel or via Supabase |
-| "check build status" | Vercel project `prj_OunOw4tQpl0FdT6xneN5uFd6EsjS`, team `team_l8PGGaIxGVbyDHwXHc64AOnb` |
-| "check the DB" | Supabase project `uevsgwozfcuttayhplzj` |
+| What Simone says | MCP to use | Action |
+|---|---|---|
+| "scrape leads for barbers in Edinburgh" | Chrome MCP | Google Maps browser workflow |
+| "import these leads" | Supabase MCP | INSERT into outreach_leads |
+| "send today's emails" | Chrome MCP | /api/outreach/send-batch via console |
+| "how many sent today" | Supabase MCP | COUNT from outreach_sends |
+| "show open rates" | Supabase MCP | Query outreach_sends with opened_at |
+| "check build status" | Vercel MCP | list_deployments |
+| "why did the build fail" | Vercel MCP | get_deployment_build_logs |
+| "check if emails sent" | Vercel MCP | get_runtime_logs query="Outreach" |
+| "mark [business] converted" | Supabase MCP | UPDATE outreach_leads |
+| "remove/skip a lead" | Supabase MCP | UPDATE status='skip' |
+| "unsubscribe a lead" | Supabase MCP | UPDATE unsubscribed=true |
+| "update the skill file" | GitHub MCP | push_files to claude-skills/main |
+| "fix a bug in the code" | GitHub MCP | push_files to Digitalcove-ops |
+| "check Stripe subscriptions" | Stripe MCP | list_subscriptions |
+| "pipeline overview" | Supabase MCP | GROUP BY status, niche |
 
 ---
 
-## Known Issues & Fixes Applied
+## Known Issues & Fixes
 
 | Issue | Status |
 |---|---|
-| Wix/Sentry emails slipping through | Fixed — blocklist in import-csv and scraper |
-| firstName showing "Salon" or "blunted" | Fixed — smart extraction skips generic words |
-| Landing URL showing as tracking URL in email | Fixed — clean URL displayed, tracking in href |
-| City field showing postcode ("Edinburgh EH1 3EB") | Fixed — extractCity strips postcode |
-| US leads appearing in scrape results | Fixed — skip leads with non-UK postcodes |
-| Vercel timeout on large batches | Known — batch of 30+ takes 30s+, browser tab must stay open |
+| Wix/Sentry emails slipping through scraper | Fixed — blocklist in scraper + import |
+| firstName showing "Salon" or "blunted" | Fixed — smart word skipping in names.ts |
+| Landing URL visible as tracking URL | Fixed — clean URL in body, tracking in href |
+| City field showing postcode | Fixed — extractCity strips postcode |
+| US leads appearing | Fixed — skip non-UK postcodes |
+| Vercel 60s timeout on large batches | Known — keep Chrome tab open during send |
 
 ---
 
 ## What's Coming Next
 
-- **Google GBP API quota** — case `2-9265000041135` pending (7–10 days from Apr 7). Once approved, GBP post activity checking becomes automated.
-- **Rank Scout** — next product: local businesses get a free Google Maps visibility report, converting to subscribers. Built after GBP quota unblocked.
-- **More landing pages** — dog groomers, electricians, dentists etc. once conversion data from florists/barbers/salons is in.
+- **GBP API quota** — case `2-9265000041135` (submitted ~Apr 7, 7–10 days). Once approved, GBP posting activity checking becomes automated.
+- **Rank Scout** — next product after GBP quota unblocked. Local businesses get a free Google Maps visibility report, converting to subscribers.
+- **More landing pages** — dog groomers, electricians, dentists etc.
 - **Self-serve OAuth** — customers connect their own Google account. Currently Simone connects manually via admin dashboard.
