@@ -1,3 +1,159 @@
+# FanRink Hockey Domain Skill — v4 (27 Apr 2026)
+
+> Read this before any prompt involving: leagues, teams, game data, scores, schedules, seasons, national teams, or player identities.
+
+---
+
+## Core Architecture
+
+**One auth user → one profile → many identities** (fan, creator, player, team, league, brand, standard).
+Users switch identities rather than holding separate profiles.
+
+**Community types:**
+- **Fanzones** — platform-created, one per team, P0 for beta. Path: /fanzone/[slug]
+- **Locker Rooms** — user-created, P1/P2
+
+**Do NOT conflate Fanzones with Team Profile pages.** They are separate surfaces.
+**Teams have ONE primary_league_id** but compete in multiple competitions.
+
+---
+
+## Key Identifiers
+
+- Supabase project: atveiabuhjtmbxestdzu
+- Vercel project: prj_alpfjSXXUbD0ULLm5oY1edo7eXEu
+- GitHub repo: DevSim1/fanrink-next
+- Admin account: supportteam@fanrink.com (UUID: 3ed1047f-2b84-4b48-9f72-c1310c7eedd4)
+- Beta access code: BETAFAN (9,999 max uses)
+- TheSportsDB premium key: 485341 (images from r2.thesportsdb.com)
+- API-Sports Hockey key: f99dd2df2f359d938898b39b52c9b5fc (100 req/day)
+- Email provider: Resend (NOT Sendgrid)
+- Admin email is Microsoft/Outlook (NOT Gmail)
+
+---
+
+## Data Sources by League
+
+| League | Source | Cost | Notes |
+|--------|--------|------|-------|
+| NHL | api-web.nhle.com | Free | Official, no key needed |
+| AIHL | theaihl.com/esportsdesk | Free | Stores aihl_game_id in meta |
+| EIHL | TheSportsDB via cron-refresh | Premium key | |
+| PWHL | sync-pwhl-scores | Unknown | Audit needed |
+| SHL | TheSportsDB | Premium key | ID: 4384 |
+| DEL | TheSportsDB | Premium key | ID: 4386 |
+| Liiga | TheSportsDB | Premium key | ID: 4387 |
+| KHL | TheSportsDB | Premium key | ID: 4920. Legal: do NOT crawl without consent |
+| AHL | NOT YET INGESTED | TBD | Needs new sync-ahl-events function |
+
+**Free NHL API (no key):**
+- GET https://api-web.nhle.com/v1/schedule/{YYYY-MM-DD}
+- GET https://api-web.nhle.com/v1/gamecenter/{gameId}/landing
+- GET https://api-web.nhle.com/v1/standings/now
+
+---
+
+## DB Critical Rules
+
+- NEVER use FROM (VALUES ...) JOIN teams UPDATE pattern — catastrophic cross-join overwrite risk. Always use individual UPDATE teams SET description = '...' WHERE name = 'X' statements.
+- CREATE POLICY IF NOT EXISTS is invalid — wrap in DO block with EXCEPTION WHEN duplicate_object.
+- supabase:apply_migration for schema changes (tracked). execute_sql for read-only only.
+- leagues table uses abbreviation not short_name.
+- Team crests use strBadge not strLogo. Images from r2.thesportsdb.com.
+- sync_runs is the canonical cron logging table.
+- All commits that don't need a Vercel build must include [skip ci].
+- posts.author_id used before migration 20260125000007; user_id only from that version onward.
+- is_placeholder = true for ghost teams (NOT is_hidden).
+- privacy_level, dm_privacy, follow_approval columns DO NOT YET EXIST on profiles (27 Apr 2026). Add via migration before using.
+
+---
+
+## DB Schema — New Tables (added 26 Apr 2026)
+
+- team_memberships: team_id, user_id, role (owner/admin/player/fan enum), status (active/pending/rejected enum)
+- team_invites: team_id, invite_type (enum), invite_code, invited_email, is_placeholder
+- job_runs: job_name, status (enum), started_at, finished_at
+- post_translations: post_id, language, translated_content (AI cache)
+- promoted_posts: post_id, budget_pence, spend_pence, daily_cap_pence, cpm_pence, targeting fields
+
+PostgreSQL ENUMs: membership_role, membership_status, claim_status, invite_type, job_status
+Private schema: private.is_team_role() security definer helper
+
+---
+
+## Season Windows 2025-26
+
+| League | Status |
+|--------|--------|
+| NHL | Playoffs ACTIVE (Apr 2026) |
+| AIHL | LIVE Apr–Aug 2026 (10 teams) |
+| EIHL | ENDED 19 Apr 2026 |
+| PWHL | ENDED 26 Apr 2026. Playoffs not in DB. |
+| SHL/DEL/Liiga/KHL | 2024-25 data only. 2025-26 missing. |
+| AHL | Not ingested. |
+
+---
+
+## Cron Jobs
+
+All live-sync crons gate on has_active_games(league_abbr) function.
+- sync-nhl-scores (live): every 2min during game windows
+- sync-pwhl-scores (live): every 5min during game windows
+- sync-aihl-scores (live): every 2min weekends
+- cron-refresh (EIHL live): every 2min 14:00-21:00 UTC
+- cleanup-job-tables: 03:00 UTC daily
+
+---
+
+## Security Architecture
+
+- private schema for all security definer functions (NOT exposed schema)
+- private.is_team_role() wraps auth.uid() in SELECT for RLS
+- Views bypass RLS without security_invoker = true
+- Claim approval = atomic SQL transaction
+- Notification dedup keys: reply:{commentId}:{userId} pattern
+
+---
+
+## Hockey Rankings (2025-26)
+
+Men's: 1=USA, 2=Switzerland, 3=Canada, 4=Sweden, 5=Czechia, 6=Finland, 7=Germany
+2026 Olympics Men: USA Gold, Canada Silver, Finland Bronze
+2025 WC Men: USA 1st, Switzerland 2nd, Sweden 3rd
+
+Women's: 1=USA, 2=Canada, 3=Finland, 4=Czechia, 5=Switzerland, 6=Sweden
+2026 Olympics Women: USA Gold, Canada Silver, Switzerland Bronze
+
+---
+
+## UK Hockey Structure
+
+EIHL (10 teams, top pro tier) → NIHL National League (10 English) → NIHL Division 1 North (10 Scottish)
+EIHL regular season champion qualifies for Champions Hockey League.
+Scottish clubs: Aberdeen Lynx, Dundee Rockets, Edinburgh Capitals, Kirkcaldy Kestrels, Kilmarnock Thunder, North Ayrshire Wild, Paisley Pirates, Solway Sharks, Whitley Warriors.
+
+---
+
+## Vercel / GitHub Patterns
+
+- Poll Vercel:get_deployment with specific deployment ID (not list_deployments) for build tracking
+- Builds take 3–5 minutes
+- GitHub MCP auth expires in long sessions. If it fails, use Chrome extension to push via GitHub web editor.
+- PAT for Claude Code on MacBook valid until July 2026 (regenerated 27 Apr 2026)
+- Preview branches replay all migrations from scratch — fix source migration files directly
+
+---
+
+## Working Model
+
+- Solo non-technical founder (Simone)
+- One prompt → one PR → green → merge → next. Never stack.
+- Claude drives decisions and prepares next steps proactively
+- QA by Cowork (mobile browser testing)
+- DB fixes via MCP directly (no PR, preserves GitHub Actions)
+- Audit always precedes implementation
+- CLAUDE.md in fanrink-next root is auto-read by Claude Code
+- docs/ai/NEXT_PROMPT.md is the single source of truth for work queue
 # FanRink Hockey Domain Knowledge
 
 ## Purpose
